@@ -1,0 +1,1344 @@
+---
+title: "Exploring Possible Predictors of BMI & Adverse Childhood Experiences"
+subtitle: "Using the 2021 US Behavioral Risk Factor Surveillance System"
+author: "Samantha Baker"
+date: last-modified
+format: 
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    code-overflow: wrap
+    embed-resources: true
+    date-format: iso
+    theme: zephyr 
+---
+
+## R Packages and Setup {.unnumbered}
+
+```{r}
+#| message: false
+#| warning: false
+
+knitr::opts_chunk$set(comment = NA) 
+
+library(janitor) 
+library(haven)
+library(car)
+library(patchwork) 
+library(knitr)
+library(kableExtra)
+library(naniar)
+library(Hmisc)
+library(mosaic)
+library(simputation)
+library(GGally)
+library(rms)
+library(broom)
+library(caret)
+library(ROCR)
+library(equatiomatic)
+library(tidyverse) 
+
+theme_set(theme_bw()) 
+```
+
+# Data Source
+
+The data set I'm using for this project is the 2021 Behavioral Risk Factor Surveillance System (BRFSS) which was available to download from the Centers for Disease Control and Prevention (CDC) website (see link below). The BRFSS was established in 1984 and has since served as the premier system of health-related surveys, collecting data from US residents at the state level. These surveys focus on health-related risk behaviors, chronic health conditions, and usage of preventive health services across all 50 states, DC, and three US territories (Guam, Puerto Rico, and the US Virgin Islands). Ongoing telephone surveys are used to collect data from over 400,000 non-institutionalized adults (18+ years of age) every year through collaboration with the CDC's Population Health Surveillance Branch. Florida was excluded from the 2021 data set as it was unable to collect data over enough months to meet the minimum inclusion requirements.
+
+Data collection is managed by state health departments, with CDC assistance, following state-specific protocols. Interviews can be conducted by either state health departments or contract workers. Prospective participants are contacted either through their landline or cellular phones and all data is considered self-report (i.e., no proxy interviews). Interviewers use computer-assisted telephone interview systems (CATIS) to contact prospective participants and ask all participants the core interview questions. Some states also include optional modules and state-added questions. Telephone interviews can be completed during daytime or evening hours, seven days a week, during each calendar month. Once collected, these data are transmitted to the CDC for editing, processing, weighting, and analysis. State health departments then receive their specific data file.
+
+The main objective of the BRFSS is to collect uniform state-specific data related to the leading causes of disability and death in the US. States may also opt to ask questions outside of the core factors (ex: adverse childhood experiences module). This data helps health departments identify and address critical health issues within their communities.
+
+Data from the 2019 American Community Survey (ACS) suggest that 99% of all US households have phone service. An increasing number of households, however, are abandoning their landline phones for cellular phones. Preliminary data from the National Health Interview Survey (NHIS, 2021) suggest that 68% of adults are exclusively using wireless phones. For landline telephone sampling, one sample record is one telephone number included in a list of all telephone numbers which the CATI system randomly selects for dialing using a disproportionate stratified sample design. Interviewers then collect data from a randomly selected adult within the household being contacted. For cellular phone sampling, phone numbers are commercially available. The CATI system can call random numbers according to specific protocols. Interviewers collect data from adults answering the call who reside either in a private residence or college housing. All adults contacted via cell phone are eligible to be interviewed, regardless of their landline phone usage (i.e., complete overlap is possible).
+
+**Link**: [BRFSS 2021 Data](https://www.cdc.gov/brfss/annual_data/annual_2021.html){.uri}
+
+# The Subjects
+
+My population of interest is adults, ages 18 - 79 years of age, living in one of five southern US states that collected data on Adverse Childhood Experiences (ACEs) for the 2021 BRFSS. These include Alabama, Arkansas, Mississippi, South Carolina, and Virginia. I'm including only those subjects who completed their BRFSS interview (no partial interviews). I will take a random sample of 1,200 subjects meeting these criteria to study my linear regression outcome (BMI) and my logistic regression outcome (exposure to one or more adverse childhood experiences).
+
+# Loading and Tidying the Data
+
+## Loading the Raw Data
+
+I used the `read_xpt` function to read in the 2021 Behavioral Risk Factor Surveillance System data file (`LLCP2021.XPT_`) and create the `brfss2021` tibble containing data on 303 variables for 438,693 subjects.
+
+**Link**: [BRFSS 2021 Data](https://www.cdc.gov/brfss/annual_data/annual_2021.html){.uri}
+
+```{r}
+
+#brfss2021 <- read_xpt("LLCP2021.XPT_")
+
+#saveRDS(brfss2021, "ProjectA_dataset.RDS")
+
+brfss2021 <- readRDS("ProjectA_dataset.RDS") |>
+  clean_names() 
+
+dim(brfss2021)
+
+```
+
+## Cleaning the Data
+
+### Selecting My Variables
+
+I created the `brfssv1` tibble by filtering for subjects between the ages of 18-79, who completed their entire BRFSS interview (`dispcode`) and who lived in one of the following states: Alabama, Arkansas, Mississippi, South Carolina, and Virginia.
+
+I used the `select` function to include only those variables that I plan to use in my analyses either as identifiers, outcomes, or predictor variables. The 11 adverse childhood experiences (ACEs) variables will be used to create two new variables that I'll use to build my linear and logistic regression models. `brfssv1` contains data on 18 variables for 22,992 subjects.
+
+```{r}
+
+brfssv1 <- brfss2021   |>
+  filter(dispcode==1100) |> 
+  filter(state == 1  | state == 5 | state == 28 | state ==45 | state == 51) |>
+  filter(ageg5yr < 13) |>
+  select(state, sexvar, ageg5yr, menthlth, hlthpln, incomg1, bmi5, 
+         acedeprs, acedrink, acedrugs, aceprisn, acedivrc, 
+         acepunch, acehurt1, aceswear, acetouch, acetthem, acehvsex) 
+
+dim(brfssv1)
+
+```
+
+### Changing Variable Names
+
+I used the `rename` function to assign more meaningful names to the following variables: (1) `ageg5yr` to `agegroup`, (2) `incomg1` to `incomecat`, and (3) `bmi5` to `bmi`.
+
+```{r}
+
+brfssv2 <- brfssv1 |>
+  rename(agegroup = ageg5yr, incomecat = incomg1, bmi = bmi5)
+
+```
+
+### Converting Variable Types
+
+I used `mutate` to change values representing refusals to respond or answers of "don't know" to missing values for `hlthpln`, and `incomecat`. I used `mutate` and `fct_recode` to change variables `state`, `sexvar`, `hlthpln`, `agegroup`, and `incomecat` to factors while also assigning more meaningful labels to their values. `incomecat` originally had seven levels which I collapsed to five.
+
+I used `mutate` to create the `bmidiv` variable with values in a format more recognizable as BMI measurements. I divided `bmi` by 100 to insert the implied two decimal places. For variable `menthlth`, I used `mutate` to change values representing "none" to 0 and values representing refusals to respond or answers of "don't know" to missing values.
+
+```{r}
+#| warning: false
+
+brfssv3 <- brfssv2 |>
+  mutate(hlthpln = replace(hlthpln, hlthpln==9, NA))   |>
+  mutate(incomecat = replace(incomecat, incomecat==9, NA))   |>
+  mutate(state = fct_recode(factor(state), "Alabama"="1", "Arkansas"="5", 
+                            "Mississippi" = "28", "South Carolina" = "45", 
+                            "Virginia" = "51")) |>
+  mutate(sexvar = fct_recode(factor(sexvar), "Male" = "1", "Female" = "2")) |>
+  mutate(hlthpln = fct_recode(factor(hlthpln), "Has Insurance" = "1", 
+                              "No Insurance" = "2")) |>
+  mutate(agegroup = fct_recode(factor(agegroup), "18-24" = "1", "25-29" = "2", 
+                               "30-34" = "3", "35-39" = "4", "40-44" = "5", 
+                               "45-49" = "6", "50-54" = "7", "55-59" = "8", 
+                               "60-64" = "9", "65-69" = "10", "70-74" = "11", 
+                               "75-79" = "12"))  |>
+  mutate(incomecat  = fct_recode(factor(incomecat), "<15 to <25K" = "1", 
+                                 "<15 to <25K" = "2", "25 to <35K" = "3", 
+                                 "35 to <50K" = "4", "50 to <100K" = "5", 
+                                 "100 to 200K+" = "6", "100 to 200K+" = "7")) |>
+  mutate (bmidiv = bmi/100) |> 
+  mutate(menthlth = replace(menthlth, menthlth==88, 0)) |> 
+  mutate(menthlth = replace(menthlth, menthlth==77 | menthlth==99, NA)) 
+
+```
+
+### Creating New ACEs Variables & Assigning Subject IDs {#creating-new-aces-variables-assigning-subject-ids}
+
+I used `mutate` and `replace` to change values representing refusals to respond or answers of "don't know" to missing values for the 11 different ACEs variables I will use to develop two new ACEs variables for my analyses. `acedivrc` represents whether a subject experienced his/her parents getting divorced or separated and includes response choices of "Yes," "No," "Don't know/ Not sure," "Parents not married," and "Refused." To maintain consistency with the other ACEs variables, I changed answers of "Don't know/ Not sure," "Parents not married," and "Refused" to missing values.
+
+I used the `mutate` function to convert the 11 ACEs items to dichotomous variables. For `acedeprs`, `acedrink`, `acedrugs`, `aceprisn`, and `acedivrc`, I assigned a value of 1 to "Yes" responses and 0 to "No" responses. Variables `acepunch`, `acehurt1`, `aceswear`, `acetouch`, `acetthem`, and `acehvsex` asked subjects about frequency of certain ACEs and allowed for answers of "Never," "Once," and "More than once." I assigned a value of 0 to "Never" responses and a value of 1 to both "Once" and "More than once" responses to represent "One or more times."
+
+```{r}
+
+brfssv4 <- brfssv3 |>
+  mutate(acedeprs = replace(acedeprs, acedeprs==7 | acedeprs==9, NA)) |>
+  mutate(acedrink = replace(acedrink, acedrink==7 | acedrink==9, NA)) |>
+  mutate(acedrugs = replace(acedrugs, acedrugs==7 | acedrugs==9, NA)) |>
+  mutate(aceprisn = replace(aceprisn, aceprisn==7 | aceprisn==9, NA))|>
+  mutate(acedivrc = replace(acedivrc, acedivrc==7 | acedivrc==8 | 
+                              acedivrc==9, NA))|>
+  mutate(acepunch = replace(acepunch, acepunch==7 | acepunch==9, NA))|>
+  mutate(acehurt1 = replace(acehurt1, acehurt1==7 | acehurt1==9, NA))|>
+  mutate(aceswear = replace(aceswear, aceswear==7 | aceswear==9, NA))|>
+  mutate(acetouch = replace(acetouch, acetouch==7 | acetouch==9, NA))|>
+  mutate(acetthem = replace(acetthem, acetthem==7 | acetthem==9, NA))|>
+  mutate(acehvsex = replace(acehvsex, acehvsex==7 | acehvsex==9, NA)) |>
+  
+  mutate(acedeprs = ifelse(acedeprs==1, 1, 0)) |>
+  mutate(acedrink = ifelse(acedrink==1, 1, 0)) |>
+  mutate(acedrugs = ifelse(acedrugs==1, 1, 0)) |>
+  mutate(aceprisn = ifelse(aceprisn==1, 1, 0)) |>
+  mutate(acedivrc = ifelse(acedivrc==1, 1, 0)) |>
+  mutate(acepunch = ifelse(acepunch > 1, 1, 0)) |> 
+  mutate(acehurt1 = ifelse(acehurt1>1, 1, 0)) |> 
+  mutate(aceswear = ifelse(aceswear>1, 1, 0)) |> 
+  mutate(acetouch = ifelse(acetouch>1, 1, 0)) |> 
+  mutate(acetthem = ifelse(acetthem>1, 1, 0)) |>
+  mutate(acehvsex = ifelse(acehvsex>1, 1, 0)) 
+
+```
+
+I used `mutate` and `row_number` to assign each subject a unique ID number. I saved `id` as a character variable.
+
+```{r}
+
+brfssv5 <- brfssv4|>
+  mutate(id = row_number())  |>
+  mutate(id = as.character(id)) |>
+  relocate(id, .before=state)
+
+```
+
+I used `rowSums` to create variable `acessum`, a summary score counting the number of reported exposures to the 11 types of ACEs for every subject. I used `mutate` to create variable `anyaces`, a binary categorical variable indicating whether a subject has or has not been exposed to one or more ACEs.
+
+```{r}
+
+brfssv5$acessum <- rowSums(brfssv5[, 9:19], na.rm = TRUE) 
+
+brfssv6 <- brfssv5 |>
+  mutate(anyaces = case_when(acessum == 0 ~ "No", acessum > 0 ~ "Yes")) |>  
+  mutate(anyaces = factor(anyaces)) 
+
+brfssv6
+
+```
+
+### Sampling the Data
+
+I set a seed and used the `slice_sample` function to get a random sample of exactly 1,200 subjects from my larger `brfssv6` data set. `brfss1200` contains data on 22 variables for those subjects.
+
+```{r}
+
+set.seed(53015)
+
+brfss1200 <- slice_sample(brfssv6, n=1200) 
+
+dim(brfss1200)
+
+```
+
+### Checking Categorical Variables
+
+Each of my categorical variables (`state`, `incomecat`, `hlthpln`, `anyaces`, and `agegroup`) has at least 30 observations at each level.
+
+```{r}
+
+brfss1200 |> tabyl(state)|> 
+    kbl(digits = 2) |> kable_paper()
+
+brfss1200 |> tabyl(incomecat)|> 
+    kbl(digits = 2) |> kable_paper()
+
+brfss1200 |> tabyl(hlthpln)|> 
+    kbl(digits = 2) |> kable_paper()
+
+brfss1200 |> tabyl(anyaces)|> 
+    kbl(digits = 2) |> kable_paper()
+
+brfss1200 |> tabyl(agegroup)|> 
+    kbl(digits = 2) |> kable_paper()
+
+```
+
+### Checking Quantitative Variables
+
+Each of my quantitative variables (`bmidiv`, `menthlth`, and `acessum`) has at least 10 unique values. All of the ranges for my quantitative variables are certainly plausible (`bmidiv`) or expected (`menthlth` and `acessum`). I have some missing data for `bmidiv` and `menthlth` as well.
+
+```{r}
+
+n_distinct(brfss1200$bmidiv)
+
+n_distinct(brfss1200$menthlth)
+
+n_distinct(brfss1200$acessum)
+
+df_stats(~ bmidiv + menthlth + acessum, data = brfss1200) |>
+  kable(digits = 1) |> kable_paper()
+
+```
+
+### Arranging the Tibble
+
+I used the `select` function to arrange my `brfss1200` tibble with only those variables that I plan to use in my analyses.
+
+```{r}
+
+brfss1200 <- brfss1200 |>
+  select(id, state, sexvar, agegroup, menthlth, hlthpln, incomecat, bmidiv, 
+         acessum, anyaces)
+
+```
+
+# The Tidy Tibble
+
+## Listing the Tibble
+
+My tidied `brfss1200` tibble is printed below.
+
+```{r}
+
+brfss1200
+
+```
+
+## Size and Identifiers
+
+I have 1,200 rows and 10 columns in my `brfss1200` tibble. The identifier variable for each row in my tibble is `id`. I used the `identical` and `n_distinct` functions to check that each ID number in my data set is unique.
+
+```{r}
+
+identical(n_distinct(brfss1200$id), 
+          brfss1200 |> nrow())
+
+```
+
+## Save The Tibble
+
+I used the `write_rds` function to save my tidied data set as an .Rds file.
+
+```{r}
+
+write_rds(brfss1200, file = "brfss1200.Rds")
+
+```
+
+# The Code Book
+
+1.  **Sample Size**: The data in my complete `brfss1200` sample consist of `r nrow(brfss1200)` subjects from BRFSS 2021 between the ages of 18 and 79 in whom my outcome variables (`bmidiv` and `anyaces`) were measured.
+2.  **Missingness**: Of the `r nrow(brfss1200)` subjects, `r n_case_complete(brfss1200 |> select(menthlth, hlthpln, incomecat, bmidiv, acessum, anyaces, state, sexvar, agegroup))` have complete data on all variables listed below.
+3.  My **outcome** variables are `bmidiv`, the subject's body mass index (BMI) measured in kg/m^2^, for the linear regression, and `anyaces`, a variable indicating whether or not the subject experienced one or more adverse childhood experiences, for the logistic regression. I have `r n_case_complete(brfss1200 |> select(bmidiv))` subjects with complete data for `bmidiv` and `r n_case_complete(brfss1200 |> select(anyaces))` subjects with complete data for `anyaces`.
+4.  Candidate **predictors** for my linear regression model include `acessum`, `incomecat`, `menthlth` and `hlthpln`. Candidate **predictors** for my logistic regression model include `bmidiv`, `incomecat`, `menthlth`, and `state`.
+5.  The other variables contained in my tidy tibble are `id`, `sexvar`, and `agegroup` which correspond to each subject's identifying code, biological sex, and 5-year age group, respectively.
+
+| Variable    | Role           | Type   | Description                                                                                                               |
+|------------------|------------------|------------------|-------------------|
+| `id`        | identifier     | \-     | character ID for subjects                                                                                                 |
+| `state`     | input          | Cat-5  | subject's state of residence (AL, AR, MS, SC, VA)                                                                         |
+| `sexvar`    | identifier     | Binary | Biological sex of subjects (Female, Male)                                                                                 |
+| `agegroup`  | identifier     | Cat-12 | Subject's reported age category in 5-year increments (18-24, 25-29, 30-34, ... 75-79)                                     |
+| `menthlth`  | input          | Quant  | Number of reported poor mental health days in last 30 days (including stress, depression, emotional issues, etc.)         |
+| `hlthpln`   | input          | Binary | Does subject have health insurance? (Yes, No)                                                                             |
+| `incomecat` | input          | Cat-5  | Income level with 5 categories: (1) \<15K to \<25K, (2) 25 to \<35K, (3) 35 to \< 50K, (4) 50 to \<100K, (5) 100 to 200K+ |
+| `bmidiv`    | input/ outcome | Quant  | Subject's computed Body Mass Index (BMI, kg/m^2^) from self-reported height and weight                                    |
+| `acessum`   | input          | Quant  | Sum of Adverse Childhood Experiences (ACEs) exposures (0 - 11)                                                            |
+| `anyaces`   | outcome        | Binary | Has subject ever been exposed to an Adverse Childhood Experience? (Yes, No)                                               |
+
+**Additional Notes:**
+
+`bmidiv` - originally `bmi5`, with values reported to the thousands with "two decimal places implied" (ex: BMI of 28 reported as 2800). I divided `bmi5` by 100 to display BMI values in their typical format.
+
+`acessum` - As described by Ward, et al. (2022), I recoded the 11 ACEs variables included in my data set to create dichotomous variables for the items that had more than two response options (see: [Creating New ACEs Variables & Assigning Subject IDs](#creating-new-aces-variables-assigning-subject-ids)). I used the dichotomous ACEs variables to create a summary score (`acessum`), counting how many ACEs each subject reported with any instances of "One or more times" counting as one exposure to that particular ACE. ACEs items include:
+
+-   `acedeprs`: Living with anyone who was depressed, mentally ill, or suicidal (Yes or No)
+-   `acedrink`: Living with anyone who was a problem drinker or alcoholic (Yes or No)
+-   `acedrugs`: Living with anyone who used illegal street drugs or abused prescription medications (Yes or No)
+-   `aceprisn`: Living with anyone who served time or was sentenced to serve time in a prison, jail, or correctional facility (Yes or No)
+-   `acedivrc`: Parents separated or divorced (Yes or No)
+-   `acepunch`: Parents or adults in the home slapping, hitting, kicking, punching, or beating each other up (Never or 1+ times)
+-   `acehurt1`: Parent or adult in home hitting, beating, kicking, physically hurting subject, excluding spanking (Never or 1+ times)
+-   `aceswear`: Parent or adult in home swearing at, insulting, or putting subject down (Never or 1+ times)
+-   `acetouch`: Adult or person 5+ years older touching subject in sexual manner (Never or 1+ times)
+-   `acetthem`: Adult or person 5+ years older trying to make subject touch them in sexual manner (Never or 1+ times)
+-   `acehvsex`: Adult or person 5+ years older forcing subject to have sex (Never or 1+ times)
+
+## Numerical Description
+
+I used `describe` to display numerical descriptions of the variables in my `brfss1200` tibble.
+
+```{r}
+
+describe(brfss1200)
+
+```
+
+# Linear Regression Plans
+
+## My First Research Question
+
+How effectively can we predict BMI using the number of ACEs exposures, self-reported poor mental health days, income level, and health insurance status in a sample of 1,200 BRFSS 2021 participants (ages 18-79) living in the Southern United States?
+
+## My Quantitative Outcome
+
+The quantitative outcome I am using for my linear regression model is BMI (`bmidiv`). Increased BMI puts adults at a heightened risk for a variety of diseases and chronic health conditions such as hypertension, Type 2 diabetes, sleep apnea, mental illnesses, etc. Previous studies have shown an association between ACEs and adult obesity and I am interested in exploring this association for adults living specifically in the Southern region of the US and whether the other predictor variables I'm examining have any impact on that relationship.
+
+I have complete BMI data for `r n_case_complete(brfss1200 |> select(bmidiv))` rows of my data set. `bmidiv` has 600 different, ordered, observed values. The interquartile range of BMI values for my sample is between 24.56 and 32.89 kg/m^2^ (median 28.27 kg/m^2^).
+
+```{r}
+#| warning: false
+
+favstats(~ bmidiv, data = brfss1200) |>  
+  kable() |> kable_paper()
+
+n_distinct(brfss1200$bmidiv)
+
+```
+
+I used `ggplot` to visualize the distribution of my outcome variable, `bmidiv`, using my `brfss1200` data. I created a boxplot with violin, a histogram with Normal distribution curve superimposed, and a Normal Q-Q plot. All three plots confirm substantial right skew in my outcome data and indicate that I should consider applying an appropriate transformation to `bmidiv` before building any models.
+
+```{r}
+#| warning: false
+
+p1 <- ggplot(brfss1200, aes(x = "", y = bmidiv )) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(width = 0.25, fill = "lightblue", outlier.color = "navyblue", 
+               notch = TRUE)  +
+    labs(x = "", y = "Body Mass Index") + 
+  coord_flip() 
+
+res <- favstats(~ bmidiv , data = brfss1200) #deleted mosaic::
+bin_w <- 2 
+
+p2 <- ggplot(brfss1200, aes(x = bmidiv)) +
+  geom_histogram(binwidth = bin_w, col = "black", fill = "lightblue") +
+  stat_function(fun=function(x) 
+    dnorm(x, mean=res$mean, sd=res$sd)*res$n*bin_w, col="navyblue", 
+    linewidth=1.25)+
+    labs(x = "Body Mass Index", y = "# of subjects")
+
+p3 <- ggplot(brfss1200, aes(sample = bmidiv)) +
+  geom_qq(col = "navyblue") + geom_qq_line(linewidth=1) +
+    labs(x = "", y = "Body Mass Index")
+
+
+p2 + p3 - p1 + plot_layout(ncol = 1, height = c(3, 1)) +
+  plot_annotation(title = "Visualizing BMI Outcome",
+      subtitle = "in BRFSS sample of 1126 adults living in the Southern US")
+
+```
+
+## My Planned Predictors (Linear Model) {#my-planned-predictors-linear-model}
+
+The candidate predictors that I intend to use in my linear regression model include: `acessum` (sum of exposures to ACEs), `incomecat` (income level), `menthlth` (poor mental health days), and `hlthpln` (health insurance status). `acessum` is a quantitative variable with 12 different, ordered, observed values and `menthlth` is a quantitative variable with 24 different, ordered, observed values.
+
+`incomecat` is a multicategorical variable with five income levels. Each level includes more than 30 observations. `hlthpln` is a binary variable and each group includes more than 30 observations.
+
+```{r}
+
+n_distinct(brfss1200$acessum)
+
+n_distinct(brfss1200$menthlth)
+
+brfss1200 |> tabyl(incomecat) |> 
+    kbl(digits = 2) |> kable_paper()
+
+brfss1200 |> tabyl(hlthpln) |> 
+    kbl(digits = 2) |> kable_paper()
+
+```
+
+I have a total of 1,200 observations in my `brfss1200` data set and 1,126 of those observation have complete data for BMI (N~1~). I'm proposing the use of four candidate predictors (`acessum` + `menthlth` + `incomecat` + `hlthpln`) to build my linear models. The number of predictors I'm suggesting is not larger than **4 + (N~1~ - 100)/ 100** (14).
+
+```{r}
+
+brfss1200 |> select(id, bmidiv) |>  summary()
+
+n1 = 1200-74
+
+4 + (n1-100)/100
+
+```
+
+### Anticipated Direction of Effects
+
+I suspect that my outcome `bmidiv`, will be positively associated with `acessum` and `menthlth` such that as the number of ACEs exposures or poor mental health days increase, so too will BMI. I suspect that `bmidiv` will decrease as `incomecat` increases and that subjects with health insurance will have lower BMIs than subjects without health insurance.
+
+# Logistic Regression Plans
+
+## My Second Research Question
+
+How effectively can we predict whether or not a subject was exposed to one or more adverse childhood experiences (ACEs), using body mass index (BMI), self-reported poor mental health days, income level, and state of residence, in a sample of 1,200 BRFSS 2021 participants (ages 18-79) living in the Southern United States?
+
+## My Binary Outcome
+
+The binary outcome I'm using for my logistic regression models is `anyaces`, which indicates whether a subject reported any exposure to one or more Adverse Childhood Experiences. "No" indicates the subject reported 0 exposures to any type of ACE and "Yes" indicates between 1-11 exposures.
+
+ACEs are potentially traumatic events occurring during childhood that can have profound impacts on a person's physical health and well being. Previous studies have linked ACEs to negative health and social outcomes for adolescents and adults. I'm interested in examining whether any of the variables I'm including in my logistic models, will be strong predictors for the likelihood that an adult has been exposed to an ACE during his/her childhood and thus could benefit from being screened by a physician. In theory, these subject characteristics could be easier for health practitioners to gather in clinical settings. Increased ACEs screenings among the adult population could connect patients to needed health services/ mental health resources to address past traumas.
+
+I have `r nrow(brfss1200 |> filter(anyaces=="No"))` subjects with no ACEs exposure and `r nrow(brfss1200 |> filter(anyaces=="Yes"))` subjects who reported being exposed to at least one ACE, with no missing values.
+
+```{r}
+
+brfss1200 |> tabyl(anyaces) |>  adorn_totals() |> 
+  kable() |> kable_paper()
+
+```
+
+## My Planned Predictors (Logistic Model)
+
+The candidate predictors that I intend to use in my logistic regression model include: `bmidiv` (BMI), `incomecat` (income level), `menthlth` (poor mental health days), and `state` (subject's state of residence at the time of their BRFSS interview). `bmidiv` is a quantitative variable with 600 different, ordered, observed values and `menthlth` is a quantitative variable with 24 different, ordered, observed values (see: [My Planned Predictors (Linear Model)](#my-planned-predictors-linear-model)).
+
+`state` is a binary variable and each group includes more than 30 observations. `incomecat` is a multicategorical variable with five income levels, each containing more than 30 observations (see: [My Planned Predictors (Linear Model)](#my-planned-predictors-linear-model)).
+
+```{r}
+
+n_distinct(brfss1200$bmidiv)
+
+brfss1200 |> tabyl(state) |>  
+  kable() |> kable_paper()
+
+```
+
+I have a total of 1,200 observations in my `brfss1200` data set with `r nrow(brfss1200 |> filter(anyaces=="No"))` subjects in the smaller `anyaces` outcome group (N~2~, No ACEs). I'm proposing the use of four candidate predictors (`bmidiv` + `menthlth` + `incomecat` + `state`) to build my logistic model(s). The number of predictors I'm suggestingis not larger than **4 + (N~2~ - 100)/100** (7).
+
+```{r}
+
+brfss1200 |> select(id, anyaces) |>  summary()
+
+n2 = 476
+
+4+(n2-100)/100
+
+```
+
+### Anticipated Direction of Effects
+
+I suspect that as `bmidiv` or `menthlth` increases, subject's exposure to one or more ACEs will be more likely. I suspect that as `incomecat` increases, exposure to ACEs will be less likely. I anticipate that residents of Alabama, Arkansas, and Mississippi are more likely to report ACEs exposure than residents of South Carolina and Virginia.
+
+# Linear Regression Analyses
+
+## Missingness
+
+I used `miss_var_summary` to display a table of missing values before imputation. I have missing data for my outcome, `bmidiv`, as well as three of my predictors: (1) `incomecat`, (2) `hlthpln`, and (3) `menthlth`.
+
+```{r}
+
+miss_var_summary(brfss1200) |> filter(n_miss > 0) |> 
+    kbl(digits = 2) |> kable_paper()
+
+```
+
+I filtered `brfss1200` to exclude subjects missing data on my BMI outcome and create the `brfss1200a` tibble which includes 1,126 subjects with complete BMI outcome data. I used `miss_var_summary` to display an updated table of missing values after filtering for complete BMI data. While I now have a smaller number of subjects with missing data on my three predictor variables, there is still enough missing data to suggest that using imputation is essential for variable `incomecat` (almost 20% missing values) and probably worth doing for `hlthpln` (2.4% missing values) and `menthlth` (1.2% missing values).
+
+```{r}
+
+brfss1200a <- brfss1200 |>
+  filter(complete.cases(bmidiv))
+
+dim(brfss1200a)
+
+miss_var_summary(brfss1200a) |> filter(n_miss > 0) |> 
+    kbl(digits = 2) |> kable_paper()
+
+```
+
+I assumed missing values for my predictors were missing at random (MAR) and will use single imputation for my analyses - specifically to build a Spearman ρ2 plot and fit my two linear regression models. To deal with missingness, I created `brfss1200a_sh`, a "shadow" in my tibble to track the data that needs to be imputed.
+
+```{r}
+
+brfss1200a_sh <- bind_shadow(brfss1200a)
+
+```
+
+### Single Imputation Approach
+
+I set a seed and converted my `brfss1200a_sh` data set to a data frame to facilitate the imputation process. For `hlthpln`, a binary categorical variable, I used `impute_rhd` to draw random observations from the existing sets of 0s (no health insurance) and 1s (has health insurance) in the complete `hlthpln` data. For `menthlth`, a quantitative count variable with values between 0-30, I used `impute_pmm` so that my imputations were returned as integers, taking results from a model based on a subject's `acessum`, `agegroup`, `sexvar`, and `state.` I used `impute_cart` for `incomecat`, a multicategorical variable. The classification tree used `state`, `agegroup`, and `sexvar` to impute values for `incomecat`. I used `miss_var_table` to display that none of the variables I plan to use in my linear regression models have missing data after imputation.
+
+```{r}
+
+set.seed(031723)
+
+brfss1200a_sh <- brfss1200a_sh |> data.frame() |>
+    impute_rhd(hlthpln ~ 1) |>
+    impute_pmm(menthlth ~ acessum + agegroup + sexvar + state) |>
+    impute_cart(incomecat ~ state + agegroup + sexvar)  |>
+  as_tibble()
+
+miss_var_table(brfss1200a_sh) |> 
+    kbl(digits = 2) |> kable_paper()
+
+```
+
+## Outcome Transformation
+
+### Considering a Transformation
+
+I used the `boxCox` function to assess whether I should consider applying a transformation to my outcome variable, `bmidiv`. I used the `powerTransform` function to calculate the point estimate as well. The estimated power transformation is about -.47 which is very close to -.5, suggesting that the inverse of the square root of my outcome could be useful in building my models. Unfortunately, this transformation would present challenges with interpretability. Given that trade-off, I will instead try applying a log transformation to my outcome variable to see if that gets my outcome closer to being approximated well by a Normal distribution.
+
+```{r}
+
+model_temp <- lm(bmidiv ~ acessum + menthlth + incomecat + hlthpln,
+                 data = brfss1200a_sh)
+
+boxCox(model_temp)
+
+powerTransform(model_temp)
+
+```
+
+The newly transformed (logarithm) outcome data appears more symmetric with all three plots confirming that the Normal model is a better fit to the log of my BMI values than it is to the raw BMI values. The outliers appear more even in my boxplot, the bars of my histogram fit much better under the superimposed Normal curve, and, with only a few exceptions on either end, my data points fall along the straight reference line indicating normality, as shown on the Normal Q-Q plot. To build my models, I will use `logbmi` as my outcome variable. This appears to be a reasonable choice and I'll encounter fewer challenges with interpretability than I would have using the inverse of the square root of BMI.
+
+```{r}
+#| warning: false
+
+brfss1200a_sh <- brfss1200a_sh |>
+  mutate(logbmi = log(bmidiv))
+
+res <- favstats(~ logbmi, data = brfss1200a_sh)
+bin_w <- .1
+
+p1 <- ggplot(brfss1200a_sh, aes(x = "", y = logbmi)) +
+  geom_violin(alpha = 0.3) +
+  geom_boxplot(width = 0.25, fill = "lightblue", outlier.color = "navyblue", 
+               notch = TRUE)  +
+    labs(x = "", y = "Log(BMI)") + 
+  coord_flip()
+
+p2 <- ggplot(brfss1200a_sh, aes(x = logbmi)) +
+  geom_histogram(binwidth = bin_w, col = "black", fill = "lightblue") +
+  stat_function(fun=function(x) 
+    dnorm(x, mean=res$mean, sd=res$sd)*res$n*bin_w, col="navyblue", 
+    linewidth=1.25)+
+    labs(x = "Log(BMI)", y = "# of subjects")
+
+p3 <- ggplot(brfss1200a_sh, aes(sample = logbmi)) +
+  geom_qq(col = "navyblue") + geom_qq_line(linewidth=1) +
+    labs(x = "", y = "Log(BMI)")
+
+p2 + p3 - p1 + plot_layout(ncol = 1, height = c(3, 1)) +
+  plot_annotation(title = "Visualizing BMI Outcome After Log Transformation",
+      subtitle = "in BRFSS 2021 sample of 1126 adults living in the Southern US")
+
+```
+
+## Scatterplot Matrix and Collinearity
+
+I used `ggpairs` to display a scatterplot matrix of my `logbmi` outcome and predictor variables after transformation and imputation. The plots highlight the two strongest correlations that are worth exploring before building my models. These correlations are between self-reported poor mental health days (`menthlth`) and number of ACEs exposures (`acessum`) as well as between `logbmi` (outcome) and `acessum.` The correlation between `menthlth` and `acessum` is the strongest in the matrix at .285. While it's not a very strong correlation, I will check for collinearity issues anyway by estimating the variance inflation factors (VIFs) between my predictors.
+
+```{r}
+#| message: false
+
+ggpairs(brfss1200a_sh, columns = c("acessum", "incomecat", "menthlth", 
+                               "hlthpln", "logbmi"))
+
+```
+
+The VIF is largest for `incomecat` categories "50 to \<100K" and "100 to 200+K," but none of the values are above 5 so I'm comfortable concluding that collinearity is not a big concern moving forward with my models.
+
+```{r}
+
+modelA <- lm(logbmi ~ acessum + incomecat + menthlth + hlthpln, 
+             data = brfss1200a_sh)
+
+vif(modelA)
+
+```
+
+## Model A
+
+Model `modelA` is my main effects linear regression model. I'm estimating `logbmi`, as a function of the number of exposures to ACEs, self-reported poor mental health days, income level, and health insurance status.
+
+### Fitting Model A
+
+I fit my main effects model with both `lm` (`modelA`) and `ols` (`modelA_ols`) using my singly imputed data, `brfss1200a_sh`.
+
+```{r}
+
+modelA <- lm(logbmi ~ acessum + incomecat + menthlth + hlthpln, 
+             data = brfss1200a_sh)
+
+dd <- datadist(brfss1200a_sh)
+options(datadist = "dd")
+
+modelA_ols <- ols(logbmi ~ acessum + incomecat + menthlth + hlthpln, 
+             data = brfss1200a_sh, x = TRUE, y = TRUE)
+
+```
+
+
+### Tidied Coefficient Estimates (Model A)
+
+I used `tidy` to build a table of exponentiated coefficients for `modelA`. None of the coefficients are showing particularly large effects and zero is contained in each of the 95% confidence intervals, with the exception of predictor `acessum` and `incomecat50to<100K`.
+
+For example, the coefficient of the `acessum` effect on `logbmi` is .008. Suppose I have two subjects, Jack and Jill, who have the same income, report the same number of poor mental health days, and both have health insurance. Jack reports being exposed to two adverse childhood experiences and Jill reports being exposed to three adverse childhood experiences. `modelA` predicts that Jill's `logbmi` will be .008 higher than Jack's `logbmi` with a 95% confidence interval of (.001, .014). This confidence interval is only just the slightest bit greater than zero, however holding everything else constant, a greater number of ACEs exposures is associated with detectably higher values of BMI.
+
+```{r}
+
+tidy(modelA, conf.int = TRUE, conf.level = 0.95) |>
+  select(term, estimate, se = std.error, 
+         low95 = conf.low, high95 = conf.high, 
+         p = p.value) |>
+  kable(digits = 3) |> kable_paper()
+
+```
+
+### Summarizing Fit (Model A)
+
+I used `glance` to display the key quality of fit measures for `modelA`. The R^2^ value suggests that `modelA` accounts for 1.3% of the variation that I see in `logbmi`. The adjusted R^2^ is even lower at .6% after adjusting for the number of predictors in my model.
+
+```{r}
+
+glance(modelA) |>
+  select(r2 = r.squared, adjr2 = adj.r.squared, sigma, 
+         AIC, BIC, nobs, df, df.residual) |>
+  kable(digits = c(3, 3, 2, 1, 1, 0, 0, 0))|> kable_paper()
+
+```
+
+### Regression Diagnostics (Model A)
+
+I used `ggplot` to create regression diagnostic plots for my outcome, `logbmi`, in `modelA.` The first plot of residuals vs fitted values checks for non-linearity issues and identifies the three largest residual values. While I don't think I have a serious issue with non-linearity for `modelA`, there are a few fitted values on the left end of the plot that occur much more frequently than some of the larger fitted values, almost appearing as vertical lines on the plot. My Normal Q-Q plot for `modelA` checks for problems with the Normality assumption. I don't notice any real issues with this assumption as the majority of the points follow the Normal reference line quite nicely. It appears that at least 95% of my standardized residuals fall within two standard deviations of the mean. The scale-location plot for the square root of the standardized residuals, checks for problems with constant variance. It seems that the fitted `logbmi` values are generally equally spread along the range of predictors however the loess smooth line is trending upward which could indicate an issue with constant variance though it doesn't seem to be a serious problem. The plot displaying residuals vs leverage checks for points that are highly influential in `modelA`. I have a number of points with more leverage in the model but the plot does not indicate any points exerting substantial influence in `modelA` (that is, no points have a Cook's distance of at least .5).
+
+```{r}
+#| fig-height: 8
+
+par(mfrow = c(2,2)); plot(modelA); par(mfrow = c(1,1))
+
+```
+
+## Non-Linearity
+
+To build a second model, I will augment `modelA` by including some non-linear terms. I used the `plot` and `spearman2` functions to display a Spearman ρ2 plot to assess non-linearity and determine the variables that might be the best on which to spend additional degrees of freedom.
+
+The variable that appears to have the most potential predictive punch is `acessum` so I'll consider adding a non-linear term to that variable first. `acessum` is quantitative so it seems that a restricted cubic spline with 4-5 knots would be the best approach. `modelA` used 7 degrees of freedom and I'm willing to spend about 6 additional degrees of freedom so I will also consider adding an interaction term between `incomecat`, a multicategorical variable, and `acessum`.
+
+```{r}
+
+plot(spearman2(logbmi ~ acessum + incomecat + menthlth + hlthpln, 
+             data = brfss1200a_sh))
+
+```
+
+## Model B
+
+I will augment `modelA` to create `modelB`, maintaining all the same predictors as `modelA`, but also including a restricted cubic spline with five knots in `acessum` and an interaction of `incomecat` and `acessum`, in order to estimate `logbmi` values.
+
+### Fitting Model B
+
+I fit my augmented model with `lm` (`modelB`) and `ols` (`modelB_ols`) using my singly imputed data, `brfss1200a_sh`. `modelB` uses 13 degrees of freedom with the addition of the non-linear terms.
+
+```{r}
+
+modelB <- lm(logbmi ~ rcs(acessum, 5) + incomecat + menthlth + 
+              incomecat %ia% acessum + hlthpln, data = brfss1200a_sh)
+
+modelB_ols <- ols(logbmi ~ rcs(acessum, 5) + incomecat + menthlth + 
+              incomecat %ia% acessum + hlthpln, data = brfss1200a_sh,
+              x = TRUE, y = TRUE)
+
+```
+
+### Tidied Coefficient Estimates (Model B)
+
+I used `tidy` to build a table of exponentiated coefficients for `modelB`. None of the coefficients are showing particularly large effects and zero is contained in each of the 95% confidence intervals, with the exception of predictor `incomecat50to<100K`.
+
+```{r}
+
+tidy(modelB, conf.int = TRUE, conf.level = 0.95) |>
+  select(term, estimate, se = std.error, 
+         low95 = conf.low, high95 = conf.high, 
+         p = p.value) |>
+  kable(digits = 3) |> kable_paper()
+
+```
+
+### Effects Plot for Model B
+
+I used the `plot` and `summary` functions to display a plot of effects for `modelB`. Given the interaction between `acessum` and `incomecat` in `modelB`, interpreting the effect of `incomecat` on `logbmi` depends on selecting a number of ACEs exposures. The `incomecat-<15 to <25K`:`50 to <100K` term, compares the "\<15 to \<25K" income level to the "50 to \<100K" income level while requiring that `acessum` is one.
+
+Suppose I have two subjects, Jack and Jill, who both have health insurance and reported one ACE and the same number of poor mental health days. Jack's income level is \<15 to \<25K but Jill's income level is between 50 to \<100K. `modelB` estimates that Jack's `logbmi` value will be .054 higher than Jill's `logbmi` value.
+
+```{r}
+
+plot(summary(modelB_ols))
+
+kable(summary(modelB_ols), digits = 3) |>
+  kable_paper()
+
+```
+
+### Summarizing Fit (Model B)
+
+I used `glance` to display the key quality of fit measures for `modelB`. The R^2^ value suggests that `modelB` accounts for 1.5% of the variation observed in `logbmi`. The adjusted R^2^ is even lower at .4% after adjusting for the number of predictors in my model.
+
+```{r}
+
+glance(modelB) |>
+  select(r2 = r.squared, adjr2 = adj.r.squared, sigma, 
+         AIC, BIC, nobs, df, df.residual) |>
+  kable(digits = c(3, 3, 2, 1, 1, 0, 0, 0))|> kable_paper()
+
+```
+
+### Regression Diagnostics (Model B)
+
+I used `ggplot` to create regression diagnostic plots for my outcome, `logbmi`, in `modelB`. I don't notice any real issues with my Normal Q-Q plot for `modelB` with the majority of the points following the Normal reference line quite nicely. It also appears that at least 95% of my standardized residuals fall within two standard deviations of the mean. The residuals vs leverage plot indicates that I have a fewer number of points with leverage in `modelB` than I saw in `modelA` with none of the points exerting substantial influence (that is, no points have a Cook's distance of at least .5). The residuals vs fitted values and scale-location plots seem to indicate some serious issues with both non-linearity and constant variance for `modelB.` My fitted values are very concentrated on the the left end of the residuals vs fitted values plot with very few fitted values appearing between 3.45 - 3.55. The scale-location plot shows that the fitted `logbmi` values are generally not spread along the range of predictors and the loess smooth line appears to trend upward until about 3.45, at which point it starts to trend downward. As with the residuals vs fitted values plot, there are very few fitted values on the right end of the scale-location plot.
+
+```{r}
+#| fig-height: 8
+
+par(mfrow = c(2,2)); plot(modelB); par(mfrow = c(1,1))
+
+```
+
+## Validating Models A and B
+
+I set a seed and used the `validate` function to display my validated summary statistics for `modelA` and `modelB`.
+
+```{r}
+
+set.seed(31723); (valA <- validate(modelA_ols))
+
+```
+
+```{r}
+
+set.seed(31723); (valB <- validate(modelB_ols))
+
+```
+
+### Validated $R^2$, MSE, & IC Statistics
+
+The results of validation for `modelA` and `modelB` are summarized in the table below.
+
+| Model | Validated $R^2$ | Validated MSE | AIC    | BIC    | DF  |
+|:------|:----------------|:--------------|:-------|:-------|:----|
+| A     | -.002           | .0500         | -179.9 | -134.7 | 7   |
+| B     | -.01            | .0504         | -170.7 | -95.3  | 13  |
+
+## Final Linear Regression Model
+
+I prefer `modelA`. Both `modelA` and `modelB` performed very poorly in predicting the `logBMI` of subject in my samples. Both models had extremely low R^2^ values (0.013 and .015, respectively) and even worse validated R^2^ values. Actually, the validated R^2^ values performed so poorly in the test data that negative values were returned. Overall, `modelA` had a larger validated R^2^ value, a smaller validated MSE, and smaller values for AIC and BIC. The regression diagnostic plots for `modelA` also exhibited fewer issues with the four key regression assumptions whereas `modelB` seemed to display issues with both linearity and constant variance. Personally, I also prefer `modelA` because it's a simpler model than `modelB`.
+
+### Winning Model's Parameter Estimates
+
+The parameter estimates for `modelA` are summarized below. The likelihood ratio test indicates that at least some of my predictors are helpful in predicting `logbmi` in my population of interest. R^2^ (.013) indicates a very weak performance for this model.
+
+```{r}
+
+modelA_ols
+
+```
+
+### Effects Plot for Winning Model
+
+I used the `plot` and `summary` functions to display an effects plot for `modelA`.
+
+```{r}
+
+plot(summary(modelA_ols))
+
+```
+
+### Numerical Description of Effect Sizes
+
+I used the `summary` function to specify the effect sizes for all elements of `modelA.`
+
+```{r}
+
+kable(summary(modelA_ols), digits = 3) |>
+  kable_paper()
+
+```
+
+### Effect Size Descriptions
+
+**`acessum` description**: Suppose I have two subjects, Jack and Jill, who both reported the same number of poor mental health days, have the same income, and both have health insurance. Jack reported 0 ACEs exposures (25th percentile) and Jill reported 2.75 ACEs exposures (75th percentile; **NOTE**: ACEs only reported as integers in the data set). `modelA` estimates that Jack's `logbmi` will be .021 lower than Jill's `logbmi` with a 95% confidence interval of (.003, .039).
+
+**`incomecat - <15 to <25K:50 to <100K` description**: Suppose I have two subjects, Jack and Jill, who both reported the same number of ACEs exposures and poor mental health days and who also both have health insurance. Jack's income level is \<15 to \<25K and Jill's income level is 50 to \<100K. `modelA` estimates that Jack's `logbmi` would be .048 higher than Jill's `logbmi` with a 95% confidence interval of (.009, .087).
+
+### Nomogram of Winning Model
+
+I used the `plot` and `nomogram` functions to display a nomogram for `modelA.`
+
+```{r}
+
+plot(nomogram(modelA_ols, fun = exp), cex.var = .8, cex.axis = .5)
+
+```
+
+### Prediction for Two New Subjects
+
+I created a predicted BMI for two new subjects, Jan and Stan. Jan reported exposure to 3 ACEs and 5 poor mental health days, she has health insurance and an income of 25 to \<35K. Stan reported exposure to 3 ACEs and 5 poor mental health days. He also has health insurance however his income level is 50 to \<100K.
+
+From my nomogram, Jan accrued about 91 points, corresponding to an estimated BMI of about 29.6 kg/m^2^ (actually 29.67 kg/m^2^ after running the `predict.lm` function below). From my nomogram, Stan accrued about 43 points, corresponding to an estimated BMI of about 28.4 kg/m^2^ (actually 28.45 kg/m^2^ after running the `predict.lm` function below).
+
+```{r}
+
+new_subjects <- data.frame(acessum = c(3, 3), 
+                           incomecat = c("25 to <35K", "50 to <100K"), 
+                           menthlth = c(5, 5),
+                           hlthpln = c("Has Insurance", "Has Insurance"))
+
+preds1 <- predict.lm(modelA, newdata = new_subjects, interval = "prediction", 
+                     level=.95)
+
+exp(preds1) |> kable() |> kable_paper()
+
+```
+
+| Predictor Values                                                                     | Predicted BMI | 95% Prediction Interval |
+|:------------------------------|------------------|-----------------------|
+| `acessum` = 3, `incomecat` = 25 to \<35K, `menthlth` = 5, `hlthpln` = Has Insurance  | 29.67 kg/m^2^ | (19.13, 45.99) kg/m^2^  |
+| `acessum` = 3, `incomecat` = 50 to \<100K, `menthlth` = 5, `hlthpln` = Has Insurance | 28.45 kg/m^2^ | (18.38, 44..4) kg/m^2^  |
+
+# Logistic Regression Analyses
+
+## Missingness
+
+I used `miss_var_summary` to display a table of missing values before imputation. I have no missing data for my binary outcome of interest, exposure to adverse childhood experiences or ACEs (`anyaces`). There is missing data for three of my predictors: (1) income level (`incomecat`), (2) body-mass index (`bmidiv`), and (3) total poor mental health days within the last 30 days (`menthlth`). I have complete data for my fourth predictor, `state`.
+
+There's enough missingness to suggest that using imputation is essential for variable `incomecat` (almost 20% missing values) and probably worth doing for `bmidiv` (6.2% missing values) and `menthlth` (1.3% missing values).
+
+```{r}
+
+miss_var_summary(brfss1200) |> 
+  filter(n_miss > 0) |> 
+  kbl(digits = 2) |> kable_paper()
+
+```
+
+I assumed missing values for my predictors were missing at random (MAR) and will use single imputation for my analyses - specifically to build a Spearman ρ^2^ plot and fit my two logistic regression models. To begin, I created `brfss1200_sh`, a "shadow" in my tibble to track the data that needs to be imputed.
+
+```{r}
+
+brfss1200_sh <- bind_shadow(brfss1200)
+
+```
+
+### Single Imputation Approach
+
+I set a seed and converted my `brfss1200_sh` data set to a data frame to facilitate the imputation process. For `menthlth`, a quantitative count variable with values between 0-30, I'm used `impute_pmm` to return my imputations as integers, taking results from a model based on a subject's `acessum`, `agegroup`, `sexvar`, and `state`. I used `impute_cart` for `incomecat`, a multicategorical variable. The classification tree used `state`, `agegroup`, and `sexvar`, to impute values for `incomecat`. For `bmidiv`, a continuous, quantitative variable, I used `impute_rlm` to impute values using robust linear models based on a subject's `state`, `agegroup`, and `sexvar`.
+
+I used `miss_var_summary` to display an updated missingness table and check that none of the variables I plan to use in my logistic regression models have missing data after imputation.
+
+```{r}
+
+set.seed(031823)
+
+brfss1200_sh <- brfss1200_sh |> data.frame() |>
+    impute_pmm(menthlth ~ acessum + agegroup + sexvar + state) |>
+    impute_cart(incomecat ~ state + agegroup + sexvar)  |>
+    impute_rlm(bmidiv ~ state + agegroup + sexvar)|>
+  as_tibble()
+
+miss_var_summary(brfss1200_sh) |> filter(n_miss > 0) |> 
+    kbl(digits = 2) |> kable_paper()
+
+```
+
+## Model Y
+
+Model `modelY` is my main effects logistic regression model. I'm predicting Pr(`anyaces` = 1), the probability of a subject having been exposed to an adverse childhood experience (ACE), as a function of BMI (`bmidiv`), poor mental health days (`menthlth`), income level (`incomecat`), and state of residence (`state`).
+
+### Fitting Model Y
+
+I fit my main effects model with `glm` (`modelY`) and `lrm` (`modelYlrm`) using my singly imputed data, `brfss1200_sh`. I ran a logistic regression to predict `anyaces` exposure using my four predictor variables.
+
+```{r}
+
+modelY <- glm(anyaces  ~ bmidiv + menthlth + incomecat + state,
+            data = brfss1200_sh, family = binomial(link = logit))
+
+ddd <- datadist(brfss1200_sh)
+options(datadist = "ddd")
+
+modelYlrm <- lrm(anyaces  ~ bmidiv + menthlth + incomecat + state,
+            data = brfss1200_sh, x = TRUE, y = TRUE)
+
+```
+
+### Tidied Odds Ratio Estimates (Model Y)
+
+I used `tidy` to build a table of exponentiated coefficients for `modelY`. From the list of predictors, it appears that none of the coefficients are having a particularly large effect on my outcome and one is contained in each of the 95% confidence intervals with the exception of `bmidiv`, `menthlth`, and `state=Virginia`.
+
+For example, the estimated odds ratio for the `bmidiv` effect on `anyaces` is 1.019. Suppose I have two subjects, Jack and Jill, who both reported the same number of poor mental health days, have the same income, and both reside in the same state. Jack has a BMI of 25 and Jill has a BMI of 24. `modelY` predicts that Jack's odds of `anyaces` exposure will be 1.019 times higher than Jill's odds of `anyaces` exposure with a 95% confidence interval of (1.001, 1.038). This confidence interval is only just the slightest bit greater than one, however holding everything else constant, higher BMI is associated with detectably higher odds of having been exposed to one or more ACEs.
+
+```{r}
+
+tidy(modelY, exponentiate = TRUE, conf.int = TRUE, conf.level = 0.95) |>
+  select(term, estimate, se = std.error, 
+         low95 = conf.low, high95 = conf.high, p = p.value) |>
+  kable(digits = 3) |> kable_paper()
+
+```
+
+### Effects Plot (Model Y)
+
+I used the `plot` and `summary` functions to display a plot of the odds ratio effects for `modelY`.
+
+Suppose I have two subjects, Jack and Jill, who both reported the same number of poor mental health days, have the same income, and both reside in the same state. Jack has a BMI of 32.36 and Jill has a BMI of 24.82. `modelY` predicts that Jack's odds of `anyaces` exposure will be 1.153 times higher than Jill's odds of `anyaces` exposure with a 95% confidence interval of (1.004, 1.324). This confidence interval only just excludes one, however holding everything else constant, higher BMI appears to be associated with detectably higher odds of having been exposed to one or more ACEs.
+
+```{r}
+
+plot(summary(modelYlrm))
+
+kable(summary(modelYlrm), digits = 3) |>
+  kable_paper()
+
+```
+
+### Summarizing Fit (Model Y)
+
+The key fit results for `modelY` are summarized below. The likelihood ratio test indicates that at least some of my predictors are helpful in predicting ACEs exposure in my population of interest. The Nagelkerke R^2^ (.054) and C statistic (.62) both indicate weak performance for this model that's only slightly improved over the null model and/or just random guessing.
+
+```{r}
+
+modelYlrm
+
+```
+
+I also used `glance` to display AIC, BIC, and the degrees of freedom used for `modelY`.
+
+```{r}
+
+glance(modelY) |>
+  mutate(df = nobs - df.residual - 1) |>
+  select(AIC, BIC, df, df.residual, nobs) |>
+  kable(digits = 1) |> kable_paper()
+
+```
+
+### Confusion Matrix (Model Y)
+
+I augmented my `brfss1200_sh` data to include predicted probabilities of (`anyaces` = 1) from `modelY`.
+
+```{r}
+
+modY_aug <- augment(modelY, type.predict = "response")
+
+modY_aug <- modY_aug |>
+  mutate(pred = ifelse(.fitted>=.5, 
+                       "Yes", "No"))
+
+```
+
+My prediction rule for this confusion matrix is that the fitted value of Pr(`anyaces` = 1) needs to be greater than or equal to 0.5 in order to predict `anyaces` is 1. Otherwise, I predict that `anyaces` is 0. To summarize the classification accuracy of `modelY`:
+
+-   I have a total of 1,200 observations with 39.7% of subjects reporting no ACEs exposure and 60.3% of subjects reporting exposure to one or more ACEs.
+
+-   **Accuracy**: (60 + 680)/1200 = .617; 61.7% of `modelY` predictions were accurate
+
+-   **Sensitivity**: 680/(44+680) = .939; 93.9% of subjects who were actually exposed to ACEs were predicted to have been exposed to ACEs by `modelY`
+
+-   **Specificity**: 60/(60+416) = .126; 12.6% of subjects who were not exposed to ACEs were predicted to not have been exposed to ACEs by `modelY`
+
+-   **Positive Predictive Value (PPV)**: 680/(416+680) = .62; 62% of those predicted to have ACEs exposure by `modelY` actually reported ACEs exposure
+
+-   **Negative Predictive Value (NPV)** = 60/(60+44) = .577; 57.7% of those predicted to have no ACEs exposure by `modelY` actually reported no ACEs exposure
+
+```{r}
+
+cm_modelY <- confusionMatrix(
+  data = factor(modY_aug$.fitted >= .5), 
+  reference = factor(modY_aug$anyaces=="Yes"), 
+  positive = "TRUE")
+
+cm_modelY
+
+```
+
+|  Model   |        Classification Rule        | Sensitivity | Specificity | PPV  |
+|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|
+| `modelY` | Predicted Pr(`anyaces` = 1) \>=.5 |    .939     |    .126     | .620 |
+
+## Non-Linearity
+
+To build a second model, I will augment `modelY` by including some non-linear terms. I used the `plot` and `spearman2` functions to display a Spearman ρ^2^ plot to assess non-linearity and determine the variables that might be the best on which to spend additional degrees of freedom.
+
+The variable that appears to have the most potential predictive punch is `menthlth` so I'll consider adding a non-linear term to that variable first. `menthlth` is quantitative so it seems that a restricted cubic spline with 4-5 knots would be the best approach. `modelY` used 10 degrees of freedom and I'm willing to spend an additional 3-6 degrees of freedom so I will also consider adding an interaction term between `incomecat`, a multicategorical variable, and `menthlth`.
+
+```{r}
+
+plot(spearman2(anyaces  ~ bmidiv + menthlth + incomecat + state,
+            data = brfss1200_sh))
+
+```
+
+## Model Z
+
+I will augment `modelY` to create `modelZ`, maintaining all the same predictors as `modelY`, but also including a restricted cubic spline with five knots in `menthlth` and an interaction of `incomecat` and `menthlth`, in order to predict Pr(`anyaces` = 1), the probability of a subject having been exposed to an adverse childhood experience (ACE).
+
+### Fitting Model Z
+
+I fit my augmented logistic regression model with `glm` (`modelZ`) and `lrm` (`modelZlrm`) using my singly imputed data, `brfss1200_sh`. `modelZ` uses 15 degrees of freedom with the addition of the non-linear terms.
+
+```{r}
+
+modelZ <- glm(anyaces  ~ bmidiv + rcs(menthlth, 5) + incomecat + state + incomecat %ia% menthlth,
+            data = brfss1200_sh, family = binomial(link = logit))
+
+modelZlrm <- lrm(anyaces  ~ bmidiv + rcs(menthlth, 5) + incomecat + state + incomecat %ia% menthlth,
+            data = brfss1200_sh, x = TRUE, y = TRUE)
+
+```
+
+### Tidied Odds Ratio Estimates (Model Z)
+
+I used `tidy` to build a table of exponentiated coefficients for `modelZ`. From the list of predictors, it looks like none of the coefficients are showing particularly large effects and one is contained in each of the 95% confidence intervals, with the exception of my `menthlth` spline term and `state=Virginia`.
+
+```{r}
+
+tidy(modelZ, exponentiate = TRUE, conf.int = TRUE, conf.level = 0.95) |>
+  select(term, estimate, se = std.error, 
+         low95 = conf.low, high95 = conf.high, p = p.value) |>
+  kable(digits = 3) |> kable_paper()
+
+```
+
+### Effects Plot (Model Z)
+
+I used the `plot` and `summary` functions to display a plot of effects for `modelZ`. Given the interaction between `menthlth` and `incomecat` in `modelZ`, interpreting the effect of `menthlth` on `anyaces` depends on selecting an `incomecat` level. The `menthlth-5:0` interpretation compares subjects with 5 reported poor mental health days to subjects with 0 reported poor mental health days while requiring an income level of 50 to \<100K.
+
+Suppose I have two subjects, Jack and Jill, who both have the same BMI, live in Alabama, and have incomes between 50 to \<100K. Jack reports 5 poor mental health days and Jill reports 0 poor mental health days. `modelZ` predicts that Jack's odds of ACEs exposure will be 1.746 times larger than Jill's odds of ACEs exposure with a 95% confidence interval of (1.336, 2.282). Holding everything else constant, more poor mental health days appear to be associated with detectably higher odds of having been exposed to one or more ACEs. The remaining 95% confidence intervals summarizing the odds ratio effects contain one which could indicate no difference in the odds of ACEs exposure for my subjects using these predictors.
+
+```{r}
+
+plot(summary(modelZlrm))
+
+kable(summary(modelZlrm), digits = 3) |>
+  kable_paper()
+
+```
+
+### Summarizing Fit (Model Z)
+
+The key fit results for `modelZ` are summarized below. The likelihood ratio test indicates that at least some of my predictors are helpful in predicting ACEs exposure in my population of interest. The Nagelkerke R^2^ (.065) and C statistic (.629) again indicate weak performance for this model. While they're slightly better than they were for `modelY` - Nagelkerke R^2^ (.054) and C statistic (.62) - they still suggest only slight improvement over the null model and/or just random guessing. With the exception of my spline term, the coefficients for the other non-linear terms all have larger p-values, suggesting this model isn't much of an improvement over `modelY`.
+
+```{r}
+
+modelZlrm
+
+```
+
+I also used `glance` to display AIC, BIC, and the degrees of freedom used for `modelZ`.
+
+```{r}
+
+glance(modelZ) |>
+  mutate(df = nobs - df.residual - 1) |>
+  select(AIC, BIC, df, df.residual, nobs) |>
+  kable(digits = 1) |> kable_paper()
+
+```
+
+### Confusion Matrix (Model Z)
+
+I augmented my `brfss1200_sh` data to include predicted probabilities of (`anyaces` = 1) from `modelZ`.
+
+```{r}
+
+modZ_aug <- augment(modelZ, type.predict = "response")
+
+modZ_aug <- modZ_aug |>
+  mutate(pred = ifelse(.fitted>=.5, 
+                       "Yes", "No"))
+
+```
+
+As in `modelY`, my prediction rule for this confusion matrix is that the fitted value of Pr(`anyaces` = 1) needs to be greater than or equal to 0.5 for me to predict `anyaces` is 1. Otherwise, I predict that `anyaces` is 0. To summarize the classification accuracy of `modelZ`:
+
+-   I have a total of 1,200 observations with 39.7% of subjects reporting no ACEs exposure and 60.3% of subjects reporting exposure to one or more ACEs.
+
+-   **Accuracy**: (84 + 657)/1200 = .618; 61.8% of `modelZ` predictions were accurate (compared to 61.7% in `modelY`)
+
+-   **Sensitivity**: 657/(67+657) = .907; 90.7% of subjects who were actually exposed to ACEs were predicted to have been exposed to ACEs by `modelZ` (compared to 93.9% in `modelY`)
+
+-   **Specificity**: 84/(84+392) = .177; 17.7% of subjects who were not exposed to ACEs were predicted to not have been exposed to ACEs by `modelZ` (compared to 12.6% in `modelY`)
+
+-   **Positive Predictive Value (PPV)**: 657/(392+657) = .626; 62.6% of those predicted to have ACEs exposure by `modelZ` actually reported ACEs exposure (compared to 62% in `modelY`)
+
+-   **Negative Predictive Value (NPV)** = 84/(84+67) = .556; 55.6% of those predicted to have no ACEs exposure by `modelZ` actually reported no ACEs exposure (compared to 57.7% in `modelY`)
+
+```{r}
+
+cm_modelZ <- confusionMatrix(
+  data = factor(modZ_aug$.fitted >= .5), 
+  reference = factor(modY_aug$anyaces=="Yes"), 
+  positive = "TRUE")
+
+cm_modelZ
+
+```
+
+## Validating Models Y and Z
+
+I set a seed and used the `validate` function to display my validated summary statistics for `modelY` and `modelZ.`
+
+```{r}
+
+set.seed(31823); (valY <- validate(modelYlrm))
+
+.5+(0.2007/2)
+
+```
+
+```{r}
+
+set.seed(31823); (valZ <- validate(modelZlrm))
+.5+(0.2077/2)
+
+```
+
+### Validated $R^2$ and $C$ statistics for each model
+
+The results of validation for `modelY` and `modelZ` are summarized in the table below.
+
+| Model | Validated $R^2$ | Validated C |  AIC   |  BIC   | DF  |
+|:-----:|:---------------:|:-----------:|:------:|:------:|:---:|
+|   Y   |      .0380      |    .6003    | 1584.6 | 1640.6 | 10  |
+|   Z   |      .0367      |    .6039    | 1584.7 | 1666.2 | 15  |
+
+## Final Logistic Regression Model
+
+I prefer `modelY`. Both `modelY` and `modelZ` performed poorly in predicting the probability of a subject having been exposed to an adverse childhood experience (ACE) and there was a fairly even split in how the summary statistics assessed each model. `modelY` had smaller AIC and BIC values, better performance with sensitivity and NPV classification measures, and a slightly better validated $R^2$ value. `modelZ` had slightly better $R^2$ and C statistic values, better performance with accuracy, specificity and PPV classification measures, and a small improvement in its validated C statistic over `modelY.`
+
+However, most of the measure differences I observed were negligible including the C statistic (.62 vs .629), AIC (1585.6 vs 1584.7), accuracy (61.7% vs 61.8%), PPV (62% vs 62.6%), validated $R^2$ (.038 vs .0367) and the validated C statistic (.6003 vs .6039). Because neither model really emerged as a clearly superior choice after analysis, I decided to choose the simpler model, `modelY`, my main effects model. The addition of the non-linear terms didn't substantially improve model performance so I didn't feel compelled to keep those terms. In this instance, I decided that a simpler model that performed poorly was better than a more complicated model that performed poorly.
+
+### Winning Model's Parameter Estimates
+
+The key fit results for `modelY` are summarized below. The likelihood ratio test indicates that at least some of my predictors are helpful in predicting ACEs exposure in my population of interest. The Nagelkerke R^2^ (.054) and C statistic (.62) both indicate weak performance for this model that's only slightly improved over the null model and/or just random guessing.
+
+```{r}
+
+modelYlrm
+
+```
+
+### Plot of Effect Sizes for Winning Model
+
+I used the `plot` and `summary` functions to display a plot of the odds ratio effects for `modelY`.
+
+```{r}
+
+plot(summary(modelYlrm))
+
+```
+
+### Numerical Description of Effect Sizes
+
+I used the `summary` function to specify the effect sizes for all of the elements of `modelY.`
+
+```{r}
+
+summary(modelYlrm) |> kable(digits = 3) |> kable_paper()
+
+```
+
+### Effect Size Descriptions
+
+**`BMI` description**: Suppose I have two subjects, Jack and Jill, who both reported the same number of poor mental health days, have the same income, and both reside in the same state. Jack has a BMI of 32.36 and Jill has a BMI of 24.82. `modelY` predicts that Jack's odds of `anyaces` exposure will be 1.153 times higher than Jill's odds of `anyaces` exposure with a 95% confidence interval of (1.004, 1.324).
+
+**`menthlth` description**: Suppose I have two subjects, Jack and Jill, who both have the same BMI, have the same income, and both reside in the same state. Jack reported 5 poor mental health days and Jill reported 0 poor mental health days. `modelY` predicts that Jack's odds of `anyaces` exposure will be 1.25 times higher than Jill's odds of `anyaces` exposure with a 95% confidence interval of (1.151, 1.357).
+
+### Plot of ROC Curve for Winning Model
+
+A ROC curve for `modelY` is displayed below. Based on the C statistic (AUC = .62), `modelY` ranks on the low end of a poor predictive model (those with C statistics between .6 - .7). `modelY` does not predict ACEs exposure very well in this population of adults from Southern US states.
+
+```{r}
+
+prob <- predict(modelY, brfss1200_sh, type="response")
+pred <- prediction(prob, brfss1200_sh$anyaces)
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+auc <- performance(pred, measure="auc")
+
+auc <- round(auc@y.values[[1]],3)
+roc.data <- data.frame(fpr=unlist(perf@x.values),
+                       tpr=unlist(perf@y.values),
+                       model="GLM")
+
+ggplot(roc.data, aes(x=fpr, ymin=0, ymax=tpr)) +
+    geom_ribbon(alpha=0.2, fill = "blue") +
+    geom_line(aes(y=tpr), col = "blue") +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed") +
+    labs(title = paste0("Model Y ROC Curve w/ AUC=", auc)) 
+
+```
+
+### Validated $R^2$ and $C$ statistic for Winning Model
+
+The results of validation for `modelY` are summarized in the table below.
+
+| Model | Validated $R^2$ | Validated C |  AIC   |  BIC   | DF  |
+|:-----:|:---------------:|:-----------:|:------:|:------:|:---:|
+|   Y   |      .0380      |    .6003    | 1584.6 | 1640.6 | 10  |
+
+### Nomogram of Winning Model
+
+I used `plot` and `nomogram` functions to display a nomogram for `modelY.`
+
+```{r}
+
+plot(nomogram(modelYlrm, fun = plogis), cex.var = .8, cex.axis = .4)
+
+```
+
+### Predictions for Two New Subjects
+
+I will predict ACEs exposure for two new subjects, Jan and Stan. Jan has a BMI of 20, reported one day of poor mental health, has an income of 50 to \<100K, and resides in Alabama. Stan's BMI is 35, he reported one poor mental health day, his income is between 50 to \<100K, and he's also from Alabama.
+
+From my nomogram, Jan accrued about 27 points, placing her predicted probability of ACEs exposure below .5 (actually .46 after running the `predict` function below). From my nomogram, Stan accrued 47 points, placing his predicted probability of ACEs exposure above .5 (actually .53 after running the `predict` function below).
+
+```{r}
+
+new_subjs <- 
+  data.frame(bmidiv = c(20, 35), menthlth = c(1, 1), 
+             incomecat = c("50 to <100K", "50 to <100K"), state = c("Alabama", "Alabama"))
+
+preds3 <- predict(modelY, newdata = new_subjs, type = "response")
+
+preds3
+
+```
+
+# Discusssion
+
+## Answering My Research Questions
+
+### Research Question 1
+
+My first research question was, "How effectively can we predict BMI using the number of ACEs exposures, self-reported poor mental health days, income level, and health insurance status in a sample of 1,200 BRFSS 2021 participants (ages 18-79) living in the Southern United States?"
+
+Based on the models I built and the analyses I conducted, the answer is, "not very effectively at all." My initial suspicions were that BMI would be positively associated with ACEs and poor mental health such that as the number of ACEs exposures or poor mental health days increased, so too would BMI. `modelA` supported that positive association between ACEs exposures and BMI but there wasn't much evidence for that same relationship between poor mental health days and BMI. In addition, I anticipated that BMI would decrease as subject income level increased (mostly but not always true) and that subjects with health insurance would have lower BMIs than subjects without health insurance (again, `modelA` does not support this assumption).
+
+Both of the linear regression models I built had almost no predictive value for estimating BMI values in my samples as evidenced by the low R^2^ values and even lower validated R^2^ values. Very few of my predictors had coefficients that suggested that any meaningful impact on BMI values as the estimate of their effect sizes was quite small and, with few exceptions, most of their 95% confidence intervals included zero. Moving forward, I think it's worth exploring the relationship between adverse childhood experiences and BMI in addition to considering what other variables might impact that relationship. Perhaps exploring the individual ACEs items, rather than the sum total of ACE exposures, and how those individual experiences impact BMI would be a logical next step. The ACEs items vary in level of severity (ex: living with someone with a mental illness vs sexual abuse) so it could be interesting to see how those differences materialize in terms of improving BMI modeling. I would also be interested in expanding my population of interest to include subjects from all of the states that added the ACEs module to their 2021 BRFSS to see if that changes model performance and/or whether there are any regional differences.
+
+### Research Question 2
+
+My second research question was, "How effectively can we predict whether or not a subject was exposed to one or more adverse childhood experiences (ACEs), using body mass index (BMI), self-reported poor mental health days, income level, and state of residence, in a sample of 1,200 BRFSS 2021 participants (ages 18-79) living in the Southern United States?"
+
+The analyses I ran seem to suggest that that the models I built were, at best, minimally effective at predicting ACEs exposure within my population of interest. Initially, I assumed that increases in BMI or poor mental health days would increase the probability that a subject was exposure to one or more ACEs, both of which were supported by the performance of my chosen `modelY`. I also suspected that as `incomecat` increased, exposure to any ACEs would be less likely. This assumption also held true for my chosen model. I anticipate that residents of Alabama, Arkansas, and Mississippi are more likely to report ACEs exposure than residents of South Carolina and Virginia but there was no evidence to support this assumption.
+
+Neither `modelY` nor `modelZ` predicted ACEs exposure very effectively within this population of adults from Southern US states. Both models demonstrated weak performance as evidenced by their R^2^ and C statistic results that indicated only slight improvement over just randomly guessing and/or a null model. Moreover, none of my predictors had coefficients that suggested large effects on predictions of ACEs exposures and, with few exceptions, most of their 95% confidence intervals included one.
+
+Moving forward, I think it's worth exploring subject characteristics that might be better able to predict exposure to adverse childhood experiences. This is especially true if those particular characteristics are generally easier for health practitioners to gather in clinical settings and can then lead to increased ACEs screenings and recognition of trauma symptoms. Perhaps it would be better to explore potential models that predict ACEs among children as opposed to the adult population. As with my first research question, I would also be interested in expanding my population of interest to include subjects from all of the states that added the ACEs module to their 2021 BRFSS to see if that enhances model performance and/or whether there are any regional differences.
+
+## Thoughts on Project A
+
+### Question 1
+
+> What was substantially harder or easier than you expected, and why?
+
+I think the hardest aspect of Project A was securing my data and figuring out what variables I wanted to use in my models. Once I saw that BRFSS included data on Adverse Childhood Experiences, I knew that I wanted to incorporate that into my project in some way. Initially I thought I could include ACEs data from all 16 states that included that module for BRFSS 2021m, but the ACEs data for each state was not included in the same data set. The ACEs data was spread out across the following data sets: `LLCP2021`, `LLCP2021V1`, and `LLCP2021V2`. Being quite a few weeks removed from the start of the project, I can't remember the exact issues I encountered but I remember feeling frustrated about reading the files (until we learned about the `haven` package), merging the files, and having issues with duplicate records when I did merge them. In the end, I decided to focus my population on a particular region of the US (Southern states) because all of the states I chose had their ACEs data in the same data set file.
+
+### Question 3
+
+> What was the most confusing part of doing the project, and how did you get past it?
+
+For me, the most confusing part of completing the project occurred as I worked to complete the project requirements during spring break. Balancing full-time work with classes and my responsibilities outside of work and school means that the homework plan I put together each week sometimes turns out to be more aspirational. After I submitted my Project A Plan, I turned my focus to preparing for a closed-book midterm for another class. I also had a few weekend events to attend over the past few weeks so there was a substantial break between submitting my plan and finishing my project. This required that I spend a good amount of time going back through all my project details and getting back up to speed on the plans I originally laid out. I couldn't just jump back in like I wanted to. There were a number of times where I had to go back to review lectures and course notes as I was revisiting some concepts that were creating some confusion. All of the additional time spent on these tasks was time well spent in the long run but I felt like it was slowing me down when it came to getting my project portfolio submitted.
+
+# Affirmation
+
+> I am certain that it is completely appropriate for these data to be shared with anyone, without any conditions. There are no concerns about privacy or security.
+
+# References
+
+Centers for Disease Control and Prevention. (2022, April 6). *Fast facts: Preventing adverse childhood experiences*. https://www.cdc.gov/violenceprevention/aces/fastfact.html
+
+Centers for Disease Control and Prevention. (2022, June 3). *About adult BMI*. https://tinyurl.com/26auh7fv
+
+Centers for Disease Control and Prevention. (2022, December 7). *Behavioral risk factor surveillance system: Overview BRFSS 2021*. https://www.cdc.gov/brfss/annual_data/annual_2021.html
+
+Ward, K., Ryan-Ibarra, S., Smith, M., & Sanchez-Vaznaugh, E.V. 2022. Adverse childhood experiences and cognitive disability in the 2019 United States Behavioral Risk Factor Surveillance System. *Preventive Medicine Reports, 27*, 1-7. https://doi.org/10.1016/j.pmedr.2022.101826
+
+Wiss, D.A. & Brewerton, T.D. 2020. Adverse childhood experiences and adult obesity: A systematic review of plausible mechanisms and meta-analysis of cross-sectional studies. *Physiology & Behavior, 223* 1-11. doi: 10.1016/j.physbeh.2020.112964.
+
+# Session Information
+
+```{r}
+xfun::session_info()
+```
